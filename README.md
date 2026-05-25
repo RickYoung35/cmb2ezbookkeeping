@@ -74,15 +74,15 @@ Transfer keywords: `转账汇款`, `信用卡还款`, `信用卡自动还款`, `
 
 ### Counter-Party Splitting (Transfer rows)
 
-The PDF's 对手信息 column contains two parts: a name and an account/reference number (e.g. `王珮雯 6214850287898511`). For Transfer rows these are split:
+The PDF's 对手信息 column contains two parts: a name and an account/reference number (e.g. `张三 6214850000000001`). For Transfer rows these are split:
 
-- **Account2** ← `王珮雯` (used as the destination account in ezbookkeeping)
-- **Description** ← `6214850287898511` (kept as a reference)
+- **Account2** ← `张三` (used as the destination account in ezbookkeeping)
+- **Description** ← `6214850000000001` (kept as a reference)
 
 For Expense/Income rows the full text is kept in Description unchanged.
 
 ## Notes
 
 - The tool uses PDF word-position analysis (not raw text parsing) to correctly handle merchant names that wrap across multiple lines in the PDF.
-- All 1,013 transactions from a 43-page CMB statement are extracted in ~5 seconds.
+- All transactions from a multi-page CMB statement are extracted in seconds.
 - Output is UTF-8 with BOM (`utf-8-sig`) so it opens correctly in Excel on Windows.
