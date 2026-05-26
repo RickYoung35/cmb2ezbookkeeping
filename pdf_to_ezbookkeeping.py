@@ -295,7 +295,7 @@ def write_csv(transactions: list, output_path: str,
         f = sys.stdout
         should_close = False
     else:
-        f = open(output_path, "w", newline="", encoding="utf-8-sig")
+        f = open(output_path, "w", newline="", encoding="utf-8")
         should_close = True
 
     try:
