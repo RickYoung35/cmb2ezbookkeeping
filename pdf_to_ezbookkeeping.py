@@ -316,6 +316,8 @@ EXPENSE_RULES = [
     ("扫二维码付款", "餐饮", "餐厅"),   # generic QR — default to dining
     # Investments
     ("代销理财", "理财", "理财产品"),
+    ("基金管理", "理财", "基金申购"),
+    ("清算专户", "理财", "基金申购"),
 ]
 
 # Transfer rules (Account2 name → sub category)
@@ -363,10 +365,15 @@ def split_counterparty(desc: str) -> tuple:
 
 TRANSFER_KEYWORDS = [
     "转账汇款", "信用卡还款", "信用卡自动还款", "还款",
-    "基金赎回", "基金申购", "定期存款", "定期支取",
+    "定期存款", "定期支取",
     "活期转定期", "定期转活期", "跨行转账", "行内转账",
-    "网银转账", "零钱通", "余额宝", "理财",
+    "网银转账", "零钱通", "余额宝",
     "ATM取款", "ATM提款", "ATM存款",
+]
+
+# Fund companies whose transactions are purchases (Expense) not transfers
+FUND_COMPANY_KEYWORDS = [
+    "基金管理", "基金公司", "清算专户",
 ]
 
 # x-coordinate thresholds from PDF layout (units: PDF points)
@@ -626,6 +633,11 @@ def write_csv(transactions: list, output_path: str,
                 cp_name, cp_id = split_counterparty(raw_desc)
                 account2_val = cp_name if cp_name else account2
                 description_val = cp_id
+                # Fund companies are purchases, not account transfers
+                if any(kw in account2_val for kw in FUND_COMPANY_KEYWORDS):
+                    tx_type = "Expense"
+                    account2_val = ""
+                    description_val = raw_desc
             else:
                 account2_val = ""
                 description_val = raw_desc
