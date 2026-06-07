@@ -1,4 +1,6 @@
 type,keyword,category,sub_category
+expense,信用卡还款,金融,信用卡还款
+expense,信用卡自动还款,金融,信用卡还款
 income,招银网络科技,工资,工资
 income,思爱普,工资,工资
 income,代销理财快赎,理财,基金赎回
@@ -267,6 +269,14 @@ expense,美团点评,餐饮,外卖
 expense,信和置业,居家,物业费
 expense,信和.*物业,居家,物业费
 expense,翼支付,转账,转账
+expense,财付通支付科技,转账,微信转账
+expense,待清算信用卡资金,转账,清算
+expense,直付通交易清算,转账,清算
+expense,连连银通,转账,清算
+expense,金控数据,转账,清算
+income,宝付网络,理财,理财产品
+income,民生新兴支付,转账,清算
+income,汇付数据,理财,理财产品
 expense,高新区木桑森林,餐饮,餐厅
 expense,霸王豆花饭,餐饮,餐厅
 expense,招牌口水鸡米饭,餐饮,餐厅

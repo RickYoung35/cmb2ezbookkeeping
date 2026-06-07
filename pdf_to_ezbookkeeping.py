@@ -246,7 +246,7 @@ def split_counterparty(desc: str) -> tuple:
 
 
 TRANSFER_KEYWORDS = [
-    "转账汇款", "信用卡还款", "信用卡自动还款",
+    "转账汇款",
     "定期存款", "定期支取",
     "活期转定期", "定期转活期", "跨行转账", "行内转账",
     "网银转账", "零钱通", "余额宝",
@@ -405,6 +405,7 @@ def extract_page_transactions(page, page_num: int, verbose: bool) -> list:
     # -----------------------------------------------------------------------
     result_txs = []
     pending_cp = ""
+    pending_summary = ""
     i = 0
     while i < len(parsed_lines):
         line = parsed_lines[i]
@@ -413,6 +414,9 @@ def extract_page_transactions(page, page_num: int, verbose: bool) -> list:
             if pending_cp:
                 tx["cp"] = (pending_cp + " " + tx["cp"]).strip()
                 pending_cp = ""
+            if pending_summary:
+                tx["summary"] = (pending_summary + " " + tx["summary"]).strip()
+                pending_summary = ""
             # Absorb immediately following cont lines within 8pt (Layout B)
             j = i + 1
             while j < len(parsed_lines) and parsed_lines[j]["type"] == "cont":
@@ -427,13 +431,17 @@ def extract_page_transactions(page, page_num: int, verbose: bool) -> list:
             result_txs.append(tx)
             i = j
         else:
-            # Between-rows cont line (Layout A)
-            cp_text = (line["summary"] + " " + line["cp"]).strip()
-            if cp_text:
-                if result_txs and abs(line["y"] - result_txs[-1]["y"]) <= 8:
-                    result_txs[-1]["cp"] = (result_txs[-1]["cp"] + " " + cp_text).strip()
-                else:
-                    pending_cp = (pending_cp + " " + cp_text).strip()
+            # Between-rows cont line (Layout A) — keep summary and cp separate
+            if result_txs and abs(line["y"] - result_txs[-1]["y"]) <= 8:
+                if line["summary"]:
+                    result_txs[-1]["summary"] = (result_txs[-1]["summary"] + " " + line["summary"]).strip()
+                if line["cp"]:
+                    result_txs[-1]["cp"] = (result_txs[-1]["cp"] + " " + line["cp"]).strip()
+            else:
+                if line["summary"]:
+                    pending_summary = (pending_summary + " " + line["summary"]).strip()
+                if line["cp"]:
+                    pending_cp = (pending_cp + " " + line["cp"]).strip()
             i += 1
     transactions = result_txs
 
