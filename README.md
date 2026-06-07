@@ -21,18 +21,51 @@ python3 pdf_to_ezbookkeeping.py <input.pdf> <output.csv> [options]
 
 | Option | Default | Description |
 |---|---|---|
+| `--rules FILE` | `categories.csv` (next to script) | Path to the category rules CSV file |
 | `--account NAME` | *(blank)* | Your account name as it appears in ezbookkeeping (e.g. `"招商银行储蓄卡"`) |
 | `--account2 NAME` | *(blank)* | Fallback destination account name for Transfer rows that have no counter-party info |
+| `--categorize` | off | Use local Ollama LLM to categorize transactions not matched by built-in rules |
+| `--ollama-url URL` | `http://localhost:11434` | Ollama API base URL |
+| `--ollama-model MODEL` | `qwen2.5:32b` | Ollama model to use |
 | `--timezone OFFSET` | `+08:00` | Timezone string written to every row |
 | `-v`, `--verbose` | off | Print per-page progress to stderr |
 
-### Example
+### LLM-assisted categorization
+
+The tool has ~300 built-in keyword rules covering most known merchants. For the remaining unmatched transactions (typically person-to-person transfers and unfamiliar merchants), pass `--categorize` to call a local [Ollama](https://ollama.com) instance as a fallback:
+
+```bash
+# 1. Install and start Ollama, then pull a model
+brew install ollama
+ollama pull qwen2.5:32b   # ~20 GB, recommended for Chinese text
+
+# 2. Run with LLM fallback
+python3 pdf_to_ezbookkeeping.py statement.pdf out.csv \
+    --account "招商银行储蓄卡" \
+    --categorize \
+    --verbose
+```
+
+The LLM is only called for transactions the built-in rules could not classify (typically <50 out of 1000+). Built-in rules always take priority over the LLM.
 
 ```bash
 python3 pdf_to_ezbookkeeping.py transaction_records_20250425.pdf out.csv \
     --account "招商银行储蓄卡" \
     --verbose
 ```
+
+## Customizing Categories
+
+Category rules are stored in `categories.csv` alongside the script. Each row has four columns:
+
+| Column | Values | Description |
+|---|---|---|
+| `type` | `income`, `expense`, `transfer` | Which transaction type this rule applies to |
+| `keyword` | any string or regex | Matched as a substring against the Description field |
+| `category` | e.g. `餐饮` | Top-level category |
+| `sub_category` | e.g. `餐厅` | Sub-category |
+
+Rules are tested in order; the first match wins. You can edit `categories.csv` directly to add merchants or adjust categories without touching the Python code. Use `--rules /path/to/my_rules.csv` to load a different file.
 
 ## Importing into ezbookkeeping
 
@@ -50,8 +83,8 @@ The tool produces an ezbookkeeping native CSV with 14 columns:
 | Time | 记账日期 |
 | Timezone | `--timezone` arg |
 | Type | Derived from amount sign + 交易摘要 keyword |
-| Category | *(blank — assign after import)* |
-| Sub Category | *(blank)* |
+| Category | Built-in rules; LLM fallback if `--categorize` |
+| Sub Category | Built-in rules; LLM fallback if `--categorize` |
 | Account | `--account` arg |
 | Account Currency | 货币 (always CNY) |
 | Amount | \|交易金额\| |

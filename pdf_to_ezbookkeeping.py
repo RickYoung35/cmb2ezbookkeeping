@@ -6,18 +6,23 @@ Usage:
     python3 pdf_to_ezbookkeeping.py input.pdf output.csv [options]
 
 Options:
-    --account NAME      Source account name in ezbookkeeping (default: "")
-    --account2 NAME     Transfer destination account name (default: "")
-    --timezone OFFSET   Timezone string (default: "+08:00")
-    -v, --verbose       Print per-page progress to stderr
+    --account NAME        Source account name in ezbookkeeping (default: "")
+    --account2 NAME       Transfer destination account name (default: "")
+    --timezone OFFSET     Timezone string (default: "+08:00")
+    --categorize          Use local Ollama LLM to categorize unmatched transactions
+    --ollama-url URL      Ollama base URL (default: http://localhost:11434)
+    --ollama-model MODEL  Ollama model name (default: qwen2.5:32b)
+    -v, --verbose         Print per-page progress to stderr
 """
 
 import argparse
 import csv
+import json
+import os
 import re
 import sys
+import urllib.request
 from datetime import datetime
-from typing import Optional
 
 EZBOOKKEEPING_COLUMNS = [
     "Time", "Timezone", "Type", "Category", "Sub Category",
@@ -27,304 +32,24 @@ EZBOOKKEEPING_COLUMNS = [
 ]
 
 # ---------------------------------------------------------------------------
-# Classification rules
-#
-# Each rule is (keyword, category, sub_category).
-# Rules are tested against the Description field in order; first match wins.
-# Keywords are matched as substrings (case-insensitive).
+# Classification rules — loaded from categories.csv at startup
 # ---------------------------------------------------------------------------
 
-# Income rules
-INCOME_RULES = [
-    # Salary
-    ("招银网络科技", "工资", "工资"),
-    ("思爱普", "工资", "工资"),
-    # Fund redemption / investment returns
-    ("代销理财快赎", "理财", "基金赎回"),
-    ("待清算电子汇差", "理财", "基金赎回"),
-    # Bank interest
-    ("应付利息", "理财", "利息"),
-    ("自动计提", "理财", "利息"),
-    # Income – refunds from clothing/shopping
-    ("GLYNNA", "购物", "退款"),
-    ("看幸服饰", "购物", "退款"),
-    ("朵朵棉", "购物", "退款"),
-    ("艾优儿", "购物", "退款"),
-    ("亚克西", "购物", "退款"),
-    # Income – rail refunds
-    ("中国铁路", "出行", "退款"),
-    ("中铁网络", "出行", "退款"),
-    # Income – platform refunds (美团/嘀嘀/etc already covered below after Income block)
-    ("盒马", "购物", "退款"),
-    ("京东", "购物", "退款"),
-    ("拼多多", "购物", "退款"),
-    ("格物致品", "购物", "退款"),
-    ("美团", "餐饮", "退款"),
-    ("嘀嘀", "出行", "退款"),
-    ("高德", "出行", "退款"),
-    ("滴滴", "出行", "退款"),
-    ("中铁", "出行", "退款"),
-    ("铁旅", "出行", "退款"),
-    # Tax refund
-    ("待报解中央与地方共享预算收入", "其他", "税费退款"),
-    # Individual transfers received / misc
-    ("微信转账", "转账", "微信转账"),
-    ("网银在线", "转账", "网银转账"),
-    ("贝壳找房", "其他", "其他收入"),
-    # Misc
-    ("特约商户", "其他", "其他收入"),
-]
+INCOME_RULES: list = []
+EXPENSE_RULES: list = []
+TRANSFER_RULES: list = []
 
-# Expense rules
-EXPENSE_RULES = [
-    # Transport
-    ("嘀嘀", "出行", "网约车"),
-    ("北京嘀嘀", "出行", "网约车"),
-    ("高德打车", "出行", "网约车"),
-    ("高德信息技术", "出行", "网约车"),
-    ("滴滴顺风车", "出行", "网约车"),
-    ("滴滴出行", "出行", "网约车"),
-    ("天府通", "出行", "公共交通"),
-    ("中国铁路", "出行", "火车"),
-    ("中铁网络", "出行", "火车"),
-    ("铁旅科技", "出行", "火车"),
-    ("携程", "出行", "机票/酒店"),
-    ("酒店", "出行", "住宿"),
-    # Food & dining
-    ("盒马", "餐饮", "超市/外卖"),
-    ("舞东风", "餐饮", "超市/外卖"),
-    ("红旗连锁", "餐饮", "超市/外卖"),
-    ("乡村基", "餐饮", "餐厅"),
-    ("吉牛旺", "餐饮", "餐厅"),
-    ("月嫂家", "餐饮", "餐厅"),
-    ("格外餐饮", "餐饮", "餐厅"),
-    ("食在宣", "餐饮", "餐厅"),
-    ("亚惠餐饮", "餐饮", "餐厅"),
-    ("兴红得聪餐饮", "餐饮", "餐厅"),
-    ("锦味臻鲜", "餐饮", "餐厅"),
-    ("绵羊米粉", "餐饮", "餐厅"),
-    ("绵阳米粉", "餐饮", "餐厅"),
-    ("护国寺小吃", "餐饮", "餐厅"),
-    ("老麻本味", "餐饮", "餐厅"),
-    ("郑立强内江牛肉面", "餐饮", "餐厅"),
-    ("一道菜", "餐饮", "餐厅"),
-    ("幸福小串", "餐饮", "餐厅"),
-    ("蜀户", "餐饮", "餐厅"),
-    ("吉牛旺鸭血面", "餐饮", "餐厅"),
-    ("早餐店", "餐饮", "餐厅"),
-    ("烧烤", "餐饮", "餐厅"),
-    ("抄手", "餐饮", "餐厅"),
-    ("米粉", "餐饮", "餐厅"),
-    ("面包", "餐饮", "烘焙/咖啡"),
-    ("上海东客面包", "餐饮", "烘焙/咖啡"),
-    ("柒一拾壹", "餐饮", "便利店"),
-    ("罗森", "餐饮", "便利店"),
-    ("肯德基", "餐饮", "快餐"),
-    ("美团平台商户", "餐饮", "外卖"),
-    ("拉扎斯", "餐饮", "外卖"),        # 饿了么母公司
-    ("北京三快", "餐饮", "外卖"),       # 美团母公司
-    ("食堂记", "餐饮", "餐厅"),
-    # More dining keywords (catch-all patterns)
-    ("串串", "餐饮", "餐厅"),
-    ("火锅", "餐饮", "餐厅"),
-    ("烤肉", "餐饮", "餐厅"),
-    ("烤鸭", "餐饮", "餐厅"),
-    ("烤牛", "餐饮", "餐厅"),
-    ("麻辣烫", "餐饮", "餐厅"),
-    ("麻辣串", "餐饮", "餐厅"),
-    ("钵钵鸡", "餐饮", "餐厅"),
-    ("牛肉面", "餐饮", "餐厅"),
-    ("燃面", "餐饮", "餐厅"),
-    ("豌杂面", "餐饮", "餐厅"),
-    ("荤豆花", "餐饮", "餐厅"),
-    ("肥肠", "餐饮", "餐厅"),
-    ("卤煮", "餐饮", "餐厅"),
-    ("卤", "餐饮", "餐厅"),
-    ("奶茶", "餐饮", "饮料/甜品"),
-    ("糖水", "餐饮", "饮料/甜品"),
-    ("酸奶", "餐饮", "饮料/甜品"),
-    ("冰粉", "餐饮", "饮料/甜品"),
-    ("好利来", "餐饮", "烘焙/咖啡"),
-    ("锅盔", "餐饮", "小吃"),
-    ("蛋烘糕", "餐饮", "小吃"),
-    ("包子", "餐饮", "小吃"),
-    ("小吃", "餐饮", "小吃"),
-    ("餐饮", "餐饮", "餐厅"),
-    ("饭店", "餐饮", "餐厅"),
-    ("食堂", "餐饮", "餐厅"),
-    ("父母食堂", "餐饮", "餐厅"),
-    ("小馆", "餐饮", "餐厅"),
-    ("面馆", "餐饮", "餐厅"),
-    ("德克士", "餐饮", "快餐"),
-    ("百胜", "餐饮", "快餐"),          # 肯德基/必胜客母公司
-    # Groceries / fresh produce
-    ("好多水果", "餐饮", "生鲜/水果"),
-    ("鲜诚多果蔬", "餐饮", "生鲜/水果"),
-    ("满彭菜场", "餐饮", "生鲜/水果"),
-    ("生活馆", "餐饮", "生鲜/水果"),
-    ("个体黄娜鲜鸡", "餐饮", "生鲜/水果"),
-    ("水果店", "餐饮", "生鲜/水果"),
-    # Shopping – online
-    ("京东商城", "购物", "网购"),
-    ("拼多多", "购物", "网购"),
-    ("格物致品", "购物", "网购"),       # 优衣库线上
-    ("迅销", "购物", "网购"),           # 优衣库母公司
-    ("网银在线", "购物", "网购"),       # 财付通/微信支付收款
-    ("GLYNNA", "购物", "网购"),
-    ("朵朵棉", "购物", "网购"),
-    ("艾优儿", "购物", "网购"),
-    ("欧莱雅", "购物", "美妆"),
-    ("戴可思", "购物", "美妆"),
-    ("安踏", "购物", "服装"),
-    ("启东市亿任", "购物", "网购"),
-    ("丰华烟酒", "购物", "烟酒"),
-    # Housing / utilities
-    ("国网四川省电力", "居家", "电费"),
-    ("花样年.*物业", "居家", "物业费"),
-    ("生活缴费", "居家", "生活缴费"),
-    # Telecom
-    ("中国移动", "通讯", "手机话费"),
-    ("中移动金融", "通讯", "手机话费"),
-    # Medical
-    ("华西第二医院", "医疗", "医院"),
-    ("爱生健康", "医疗", "健康管理"),
-    ("安琪儿妇产", "医疗", "医院"),
-    # Entertainment / sharing economy
-    ("街电", "生活", "共享充电"),
-    ("怪兽充电", "生活", "共享充电"),
-    ("哈啰", "出行", "共享单车/租车"),
-    ("杭州哈行", "出行", "共享单车/租车"),
-    ("永信智慧", "生活", "停车"),
-    ("动幻网吧", "娱乐", "网吧"),
-    ("哔哩哔哩", "娱乐", "视频/游戏"),
-    ("miHoYo", "娱乐", "视频/游戏"),
-    ("小红书", "娱乐", "社交"),
-    ("电子票务", "娱乐", "门票"),
-    ("公园", "娱乐", "门票"),
-    # Medical (expanded)
-    ("华西第二医院", "医疗", "医院"),
-    ("爱生健康", "医疗", "健康管理"),
-    ("安琪儿妇产", "医疗", "医院"),
-    ("省骨科医院", "医疗", "医院"),
-    ("四川省骨科", "医疗", "医院"),
-    ("高新区妇女儿童医院", "医疗", "医院"),
-    ("高新区.*门诊", "医疗", "医院"),
-    ("艾嘉综合门诊", "医疗", "医院"),
-    ("华西妇幼", "医疗", "医院"),
-    ("大药房", "医疗", "药店"),
-    ("一心堂", "医疗", "药店"),
-    ("药房", "医疗", "药店"),
-    # Shopping – in-store / supermarket
-    ("沃尔玛", "购物", "超市"),
-    ("伊藤洋华堂", "购物", "超市"),
-    ("宜享佳超市", "购物", "超市"),
-    ("悠涵超市", "购物", "超市"),
-    ("梓潼鲜雨汶超市", "购物", "超市"),
-    ("百乐购超市", "购物", "超市"),
-    ("都江堰市纽北超市", "购物", "超市"),
-    ("见福便利", "餐饮", "便利店"),
-    ("福满家便利", "餐饮", "便利店"),
-    ("渣渣便利", "餐饮", "便利店"),
-    # Shopping – clothing / personal care
-    ("看幸服饰", "购物", "服装"),
-    ("义乌市苏润服饰", "购物", "服装"),
-    ("义乌市奥珑针织", "购物", "服装"),
-    ("胜道运动", "购物", "运动"),
-    ("想成为美女的店", "购物", "服装"),
-    ("MinMin小个子", "购物", "服装"),
-    ("梦回千屿", "购物", "服装"),
-    ("南通唯林舍", "购物", "服装"),
-    ("南昌雪菲俪", "购物", "服装"),
-    ("歌家贸易", "购物", "服装"),
-    ("娅靖品牌", "购物", "服装"),
-    ("相宜云商", "购物", "美妆"),
-    ("福瑞达生物", "购物", "美妆"),
-    ("远想生物", "购物", "美妆"),
-    ("璞致岱玛", "购物", "美妆"),
-    ("广东省蔬果园生物", "购物", "美妆"),
-    ("一佳造型", "购物", "美发/美容"),
-    # Shopping – baby / maternity
-    ("朵朵棉", "购物", "母婴"),
-    ("艾优儿", "购物", "母婴"),
-    ("台州市黄岩皓诚婴童", "购物", "母婴"),
-    ("惠民妇儿", "购物", "母婴"),
-    ("童季科技", "购物", "母婴"),
-    # Shopping – home / electronics
-    ("奥尔电气", "购物", "家电"),
-    ("乐其网络", "购物", "数码"),
-    ("长颈猫智能", "购物", "数码"),
-    ("李琳电子", "购物", "数码"),
-    ("傲域电子", "购物", "数码"),
-    ("甄严选家具", "购物", "家居"),
-    ("浙睿玩具", "购物", "玩具"),
-    # Shopping – wine / tobacco
-    ("广州裕鼎隆酒业", "购物", "烟酒"),
-    ("梓潼老庙黄金", "购物", "金饰"),
-    ("金饰", "购物", "金饰"),
-    # Housing
-    ("晶通汇", "居家", "物业费"),       # 成都晶通汇 = property management
-    ("左邻先生", "居家", "物业费"),
-    ("永信智慧", "居家", "停车"),
-    # Travel / scenic spots
-    ("希望叠松旅游", "出行", "旅游"),
-    ("旅游便利店", "出行", "旅游"),
-    ("所见所得", "娱乐", "旅游/景点"),
-    # Misc individual payees — generic fallback for person names
-    ("特约商户", "其他", "其他"),
-    ("亚克西", "购物", "网购"),
-    # Generic food keywords to catch long-tail merchants
-    ("食品", "餐饮", "餐厅"),
-    ("海鲜", "餐饮", "餐厅"),
-    ("生鲜", "餐饮", "生鲜/水果"),
-    ("菜场", "餐饮", "生鲜/水果"),
-    ("超市", "购物", "超市"),
-    ("便利店", "餐饮", "便利店"),
-    ("啫火啫啫煲", "餐饮", "餐厅"),
-    ("九锅一堂", "餐饮", "餐厅"),
-    ("商户", "其他", "其他"),          # 商户许建荣 / 商户_冉燕妮 etc.
-    ("圆明园", "娱乐", "门票"),
-    ("灵感之茶", "餐饮", "饮料/甜品"),
-    ("掌门土豆", "餐饮", "餐厅"),
-    ("全棉时代", "购物", "服装"),
-    ("光耀盛达", "购物", "网购"),
-    ("宇洁商贸", "购物", "网购"),
-    ("爱达乐", "餐饮", "餐厅"),
-    ("协盛隆", "购物", "超市"),
-    ("快鱼连锁", "餐饮", "餐厅"),
-    ("点心铺", "餐饮", "小吃"),
-    ("厚文信龙食品", "餐饮", "餐厅"),
-    ("焖烧", "餐饮", "餐厅"),
-    ("回香园", "餐饮", "餐厅"),
-    ("本物之味", "餐饮", "餐厅"),
-    ("莫光头牛肉", "餐饮", "餐厅"),
-    ("有红鸡毛店", "餐饮", "餐厅"),
-    ("老花溪", "餐饮", "餐厅"),
-    ("隆府", "餐饮", "餐厅"),
-    ("民族团结.*羊肉串", "餐饮", "餐厅"),
-    ("白果树", "餐饮", "生鲜/水果"),
-    ("黑味美川藏黑猪", "餐饮", "生鲜/水果"),
-    ("鲜牛肉", "餐饮", "生鲜/水果"),
-    ("馅太野", "餐饮", "餐厅"),
-    ("环保新零售", "购物", "其他"),
-    ("西堂圣物", "购物", "其他"),
-    ("西北杂粮筐", "餐饮", "餐厅"),
-    ("喜识", "购物", "其他"),
-    # Transfers / social
-    ("微信转账", "转账", "微信转账"),
-    ("微信红包", "转账", "微信红包"),
-    ("群收款", "转账", "微信转账"),
-    ("扫二维码付款", "餐饮", "餐厅"),   # generic QR — default to dining
-    # Investments
-    ("代销理财", "理财", "理财产品"),
-    ("基金管理", "理财", "基金申购"),
-    ("清算专户", "理财", "基金申购"),
-]
 
-# Transfer rules (Account2 name → sub category)
-TRANSFER_RULES = [
-    ("王珮雯", "转账", "家人转账"),
-    ("杨新雨", "转账", "本人转账"),
-]
+def load_rules(path: str) -> tuple:
+    """Load classification rules from a CSV file. Returns (income, expense, transfer) rule lists."""
+    income, expense, transfer = [], [], []
+    target = {"income": income, "expense": expense, "transfer": transfer}
+    with open(path, newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            lst = target.get(row["type"].strip().lower())
+            if lst is not None:
+                lst.append((row["keyword"], row["category"], row["sub_category"]))
+    return income, expense, transfer
 
 
 def classify(tx_type: str, description: str, account2: str) -> tuple:
@@ -343,6 +68,163 @@ def classify(tx_type: str, description: str, account2: str) -> tuple:
             return cat, sub
 
     return "", ""
+
+
+# ---------------------------------------------------------------------------
+# LLM-based categorization (Ollama fallback)
+# ---------------------------------------------------------------------------
+
+# All category/sub-category pairs the hard-coded rules use, plus ezbookkeeping
+# defaults — presented to the LLM so it picks from a known set.
+_CATEGORY_OPTIONS = """
+Expense categories:
+  餐饮 / 餐厅
+  餐饮 / 外卖
+  餐饮 / 快餐
+  餐饮 / 烘焙/咖啡
+  餐饮 / 饮料/甜品
+  餐饮 / 便利店
+  餐饮 / 小吃
+  餐饮 / 超市/外卖
+  餐饮 / 生鲜/水果
+  购物 / 网购
+  购物 / 超市
+  购物 / 服装
+  购物 / 美妆
+  购物 / 母婴
+  购物 / 数码
+  购物 / 家电
+  购物 / 家居
+  购物 / 运动
+  购物 / 玩具
+  购物 / 烟酒
+  购物 / 金饰
+  购物 / 美发/美容
+  购物 / 其他
+  出行 / 网约车
+  出行 / 公共交通
+  出行 / 火车
+  出行 / 机票/酒店
+  出行 / 住宿
+  出行 / 旅游
+  出行 / 共享单车/租车
+  居家 / 电费
+  居家 / 物业费
+  居家 / 停车
+  居家 / 生活缴费
+  通讯 / 手机话费
+  医疗 / 医院
+  医疗 / 药店
+  医疗 / 健康管理
+  生活 / 共享充电
+  娱乐 / 视频/游戏
+  娱乐 / 门票
+  娱乐 / 网吧
+  娱乐 / 社交
+  娱乐 / 旅游/景点
+  理财 / 理财产品
+  理财 / 基金申购
+  转账 / 微信转账
+  转账 / 微信红包
+  转账 / 家人转账
+  转账 / 朋友转账
+  转账 / 清算
+  其他 / 其他
+
+Income categories:
+  工资 / 工资
+  理财 / 基金赎回
+  理财 / 利息
+  出行 / 退款
+  购物 / 退款
+  餐饮 / 退款
+  其他 / 税费退款
+  其他 / 其他收入
+
+Transfer categories:
+  转账 / 家人转账
+  转账 / 本人转账
+  转账 / 朋友转账
+  转账 / 转账
+"""
+
+_LLM_PROMPT_TEMPLATE = """\
+You are a personal finance categorization assistant. Classify the following \
+bank transaction into exactly one category from the list below.
+
+Transaction:
+  Type: {tx_type}
+  Counter-party / Description: {description}
+  Amount: {amount} CNY
+
+Available categories (format: Category / Sub Category):
+{categories}
+
+Rules:
+- Reply with ONLY a JSON object, no explanation.
+- Use the exact category and sub-category strings from the list.
+- If the description looks like a person's name with no other context, \
+use 转账 / 朋友转账 for Expense or 其他 / 其他收入 for Income.
+- If truly uncertain, use 其他 / 其他.
+
+Reply format: {{"category": "...", "sub_category": "..."}}"""
+
+
+def llm_categorize_batch(
+    transactions: list,
+    ollama_url: str,
+    model: str,
+    verbose: bool,
+) -> dict:
+    """
+    Call Ollama for each transaction that needs categorization.
+    Returns a dict mapping index → (category, sub_category).
+    Only called for transactions where hard-coded rules returned ("", "").
+    """
+    results = {}
+    api_url = ollama_url.rstrip("/") + "/api/generate"
+
+    for i, tx in transactions:
+        prompt = _LLM_PROMPT_TEMPLATE.format(
+            tx_type=tx["Type"],
+            description=(tx.get("account2_val") or tx.get("raw_desc", "")).strip(),
+            amount=tx["Amount"],
+            categories=_CATEGORY_OPTIONS.strip(),
+        )
+
+        payload = json.dumps({
+            "model": model,
+            "prompt": prompt,
+            "stream": False,
+            "format": "json",
+            "options": {"temperature": 0},
+        }).encode()
+
+        try:
+            req = urllib.request.Request(
+                api_url,
+                data=payload,
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                body = json.loads(resp.read())
+            parsed = json.loads(body["response"])
+            cat = parsed.get("category", "").strip()
+            sub = parsed.get("sub_category", "").strip()
+            if cat and sub:
+                results[i] = (cat, sub)
+                if verbose:
+                    desc = (tx.get("account2_val") or tx.get("raw_desc", ""))
+                    print(f"  LLM [{tx['Type']}] '{desc}' → {cat} / {sub}", file=sys.stderr)
+            else:
+                results[i] = ("其他", "其他")
+        except Exception as e:
+            if verbose:
+                print(f"  LLM error for row {i}: {e}", file=sys.stderr)
+            results[i] = ("其他", "其他")
+
+    return results
+
 
 # Last token of a description is a counter-party account/merchant ID if it is
 # purely alphanumeric and contains at least one digit (e.g. '6214850287898511',
@@ -364,7 +246,7 @@ def split_counterparty(desc: str) -> tuple:
 
 
 TRANSFER_KEYWORDS = [
-    "转账汇款", "信用卡还款", "信用卡自动还款", "还款",
+    "转账汇款", "信用卡还款", "信用卡自动还款",
     "定期存款", "定期支取",
     "活期转定期", "定期转活期", "跨行转账", "行内转账",
     "网银转账", "零钱通", "余额宝",
@@ -379,7 +261,6 @@ FUND_COMPANY_KEYWORDS = [
 # x-coordinate thresholds from PDF layout (units: PDF points)
 # Col 0 记账日期: x~36   Col 1 货币: x~98   Col 2 交易金额: x~156
 # Col 3 联机余额: x~234  Col 4 交易摘要: x~307  Col 5 对手信息: x~417
-X_DATE = 36
 X_CURRENCY = 98
 X_AMOUNT = 156
 X_BALANCE = 234
@@ -387,16 +268,6 @@ X_SUMMARY = 307
 X_COUNTERPARTY = 390  # threshold: x >= this → counter party column
 
 DATE_RE = re.compile(r"^\d{4}[-/]\d{2}[-/]\d{2}$")
-
-SKIP_TEXT = {
-    "记账日期", "货币", "交易金额", "联机余额", "交易摘要", "对手信息",
-    "Transaction", "Date", "Currency", "Balance", "Amount", "Counter", "Party",
-    "Type", "招商银行交易流水", "Statement", "of", "China", "Merchants", "Bank",
-    "户", "名：杨新雨", "账号：6214850286924045", "Name", "Account", "No",
-    "账户类型：ALL/全币种", "开", "户", "行：成都玉双路支行", "Sub", "Branch",
-    "申请时间：2025-04-25", "19:34:03", "验", "证", "码：7A72HF3M",
-    "Verification", "Code",
-}
 
 
 def parse_amount(raw: str) -> float:
@@ -438,10 +309,16 @@ def extract_page_transactions(page, page_num: int, verbose: bool) -> list:
       ~307  交易摘要 (summary/type)
       ~417  对手信息 (counter party / description)
 
-    Multi-line rows: when the counter party name is long it wraps to the next
-    visual line, which appears in the PDF *between* two date-anchored rows.
-    The continuation line has x >= X_COUNTERPARTY and no date in col 0.
-    It belongs to the transaction whose date line immediately precedes it.
+    Two multi-line layouts exist across different CMB statement generations:
+
+    Layout A (newer): summary and cp appear on the date line's y; wrapped cp
+      fragments appear on lines between two date rows (gap ~6pt to owner, ~21pt
+      to the other). Continuation lines contain only cp-column words (x >= X_CP).
+
+    Layout B (older): the date line carries only date/currency/amount/balance;
+      summary and cp appear on the line immediately below (+6pt). A second
+      continuation line (+21pt from date) carries a second cp fragment. Both
+      continuation lines may contain words in both summary and cp columns.
     """
     words = page.extract_words(x_tolerance=3, y_tolerance=3)
     if not words:
@@ -456,10 +333,9 @@ def extract_page_transactions(page, page_num: int, verbose: bool) -> list:
     # Sort lines top-to-bottom; within each line sort left-to-right
     sorted_ys = sorted(lines_by_y.keys())
 
-    # Classify each line
-    # A "data line" starts with a date token at x ~ X_DATE
-    # A "continuation line" has all tokens at x >= X_COUNTERPARTY
-
+    # -----------------------------------------------------------------------
+    # Pass 1: classify each line as "tx" (starts with date) or "cont" (other)
+    # -----------------------------------------------------------------------
     parsed_lines = []
     for y in sorted_ys:
         line_words = sorted(lines_by_y[y], key=lambda w: w["x0"])
@@ -467,9 +343,8 @@ def extract_page_transactions(page, page_num: int, verbose: bool) -> list:
         first_text = first["text"].strip()
 
         if DATE_RE.match(first_text) and first["x0"] < X_CURRENCY:
-            # This is a transaction anchor line
-            # Collect tokens by column
-            date_tok = currency_tok = amount_tok = balance_tok = ""
+            # Transaction anchor line — collect tokens by column
+            date_tok = currency_tok = amount_tok = ""
             summary_parts = []
             cp_parts = []
             for w in line_words:
@@ -482,7 +357,7 @@ def extract_page_transactions(page, page_num: int, verbose: bool) -> list:
                 elif x < X_BALANCE:
                     amount_tok = t
                 elif x < X_SUMMARY:
-                    balance_tok = t  # not used
+                    pass  # balance, not used
                 elif x < X_COUNTERPARTY:
                     summary_parts.append(t)
                 else:
@@ -497,67 +372,70 @@ def extract_page_transactions(page, page_num: int, verbose: bool) -> list:
                 "cp": " ".join(cp_parts),
             })
         else:
-            # Check if this is a counter-party continuation line:
-            # all words at x >= X_COUNTERPARTY (or close to it)
-            if all(w["x0"] >= X_COUNTERPARTY - 10 for w in line_words):
-                # Skip known header/label lines
-                combined = " ".join(w["text"] for w in line_words)
-                if any(skip in combined for skip in ("记账日期", "Transaction", "Date ", "Currency", "Counter", "招商银行")):
-                    continue
-                # Skip page number lines like "1/43"
-                if re.match(r"^\d+/\d+$", combined.strip()):
-                    continue
-                parsed_lines.append({"type": "cont", "y": y, "cp": combined})
+            # Candidate continuation line — skip known headers and page numbers
+            combined = " ".join(w["text"] for w in line_words)
+            if any(skip in combined for skip in ("记账日期", "Transaction", "Date ", "Currency", "Counter", "招商银行")):
+                continue
+            if re.match(r"^\d+/\d+$", combined.strip()):
+                continue
 
-    # Merge each continuation line into the nearest transaction by y-distance.
-    # In CMB PDFs a wrapped counter-party fragment is always 6 pts from its
-    # owner transaction and 20+ pts from any other, so nearest-neighbour is exact.
-    transactions = []
-    for line in parsed_lines:
-        if line["type"] != "cont":
-            transactions.append(dict(line))
-            continue
+            # Classify words into summary vs cp columns
+            summary_parts = [w["text"] for w in line_words if w["x0"] < X_COUNTERPARTY and w["x0"] >= X_SUMMARY - 10]
+            cp_parts = [w["text"] for w in line_words if w["x0"] >= X_COUNTERPARTY - 10]
 
-        y_cont = line["y"]
-        cp_text = line["cp"]
+            # Only keep as a continuation if it has at least some content in
+            # the summary or cp column area (ignore stray left-margin words)
+            if not summary_parts and not cp_parts:
+                continue
 
-        if not transactions:
-            # No previous tx yet — will be picked up by the look-ahead below
-            # Store as a pending prefix: attach to first transaction added later.
-            # We achieve this by just prepending to parsed_lines in-place isn't
-            # safe here; instead use a pending list.
-            line["_pending"] = True
-            transactions.append(line)
-            continue
+            parsed_lines.append({
+                "type": "cont",
+                "y": y,
+                "summary": " ".join(summary_parts),
+                "cp": " ".join(cp_parts),
+            })
 
-        prev_tx = transactions[-1]
-        prev_y = prev_tx.get("y", y_cont - 999)
-        dist_prev = abs(y_cont - prev_y)
-
-        # Peek at the next tx in parsed_lines to compute dist_next
-        # We don't have easy random access here, so we use the stored y values.
-        # The logic: if dist_prev <= 8, attach to prev; otherwise defer to next.
-        if dist_prev <= 8:
-            existing = prev_tx["cp"]
-            prev_tx["cp"] = (existing + " " + cp_text).strip() if existing else cp_text
-        else:
-            # Attach as prefix to the next transaction (mark as pending)
-            line["_pending"] = True
-            transactions.append(line)
-
-    # Resolve pending prefixes: merge each pending continuation into the
-    # tx that immediately follows it.
-    resolved = []
+    # -----------------------------------------------------------------------
+    # Pass 2: single walk — attach each cont line to the right transaction.
+    #
+    # Layout B (older PDF): date line has no summary/cp; the cont line(s)
+    #   immediately following (gap ≤ 8pt) carry that data inline → absorb.
+    # Layout A (newer PDF): cont lines appear between two date rows; use
+    #   nearest-neighbour gap rule (≤ 8 → append to prev, > 8 → prefix next).
+    # -----------------------------------------------------------------------
+    result_txs = []
     pending_cp = ""
-    for item in transactions:
-        if item.get("_pending"):
-            pending_cp = (pending_cp + " " + item["cp"]).strip()
-        else:
+    i = 0
+    while i < len(parsed_lines):
+        line = parsed_lines[i]
+        if line["type"] == "tx":
+            tx = dict(line)
             if pending_cp:
-                item["cp"] = (pending_cp + " " + item["cp"]).strip()
+                tx["cp"] = (pending_cp + " " + tx["cp"]).strip()
                 pending_cp = ""
-            resolved.append(item)
-    transactions = resolved
+            # Absorb immediately following cont lines within 8pt (Layout B)
+            j = i + 1
+            while j < len(parsed_lines) and parsed_lines[j]["type"] == "cont":
+                if parsed_lines[j]["y"] - tx["y"] > 8:
+                    break
+                nxt = parsed_lines[j]
+                if nxt["summary"]:
+                    tx["summary"] = (tx["summary"] + " " + nxt["summary"]).strip()
+                if nxt["cp"]:
+                    tx["cp"] = (tx["cp"] + " " + nxt["cp"]).strip()
+                j += 1
+            result_txs.append(tx)
+            i = j
+        else:
+            # Between-rows cont line (Layout A)
+            cp_text = (line["summary"] + " " + line["cp"]).strip()
+            if cp_text:
+                if result_txs and abs(line["y"] - result_txs[-1]["y"]) <= 8:
+                    result_txs[-1]["cp"] = (result_txs[-1]["cp"] + " " + cp_text).strip()
+                else:
+                    pending_cp = (pending_cp + " " + cp_text).strip()
+            i += 1
+    transactions = result_txs
 
     # Convert to output dicts
     results = []
@@ -613,7 +491,9 @@ def extract_transactions(pdf_path: str, verbose: bool = False) -> list:
 
 
 def write_csv(transactions: list, output_path: str,
-              timezone: str, account: str, account2: str) -> int:
+              timezone: str, account: str, account2: str,
+              use_llm: bool = False, ollama_url: str = "",
+              ollama_model: str = "", verbose: bool = False) -> int:
     if output_path == "-":
         f = sys.stdout
         should_close = False
@@ -624,16 +504,19 @@ def write_csv(transactions: list, output_path: str,
     try:
         writer = csv.DictWriter(f, fieldnames=EZBOOKKEEPING_COLUMNS)
         writer.writeheader()
+
+        # First pass: build all rows and collect unmatched indices for LLM
+        built_rows = []
+        llm_needed = []  # list of (index, tx_dict_with_context)
+
         for tx in transactions:
             tx_type = tx["Type"]
             raw_desc = tx["Description"]
 
             if tx_type == "Transfer":
-                # Split "王珮雯 6214850287898511" → Account2="王珮雯", Description="6214850287898511"
                 cp_name, cp_id = split_counterparty(raw_desc)
                 account2_val = cp_name if cp_name else account2
                 description_val = cp_id
-                # Fund companies are purchases, not account transfers
                 if any(kw in account2_val for kw in FUND_COMPANY_KEYWORDS):
                     tx_type = "Expense"
                     account2_val = ""
@@ -642,9 +525,9 @@ def write_csv(transactions: list, output_path: str,
                 account2_val = ""
                 description_val = raw_desc
 
-            category, sub_category = classify(tx_type, tx["Description"], account2_val)
+            category, sub_category = classify(tx_type, description_val, account2_val)
 
-            writer.writerow({
+            row = {
                 "Time": tx["Time"],
                 "Timezone": timezone,
                 "Type": tx_type,
@@ -659,12 +542,35 @@ def write_csv(transactions: list, output_path: str,
                 "Geographic Location": "",
                 "Tags": "",
                 "Description": description_val,
-            })
+            }
+            built_rows.append(row)
+
+            if use_llm and not category:
+                llm_needed.append((len(built_rows) - 1, {
+                    **tx,
+                    "Type": tx_type,
+                    "account2_val": account2_val,
+                    "raw_desc": raw_desc,
+                }))
+
+        # Second pass: fill LLM results for unmatched rows
+        if llm_needed:
+            if verbose:
+                print(f"  Sending {len(llm_needed)} unmatched rows to LLM ({ollama_model})...",
+                      file=sys.stderr)
+            llm_results = llm_categorize_batch(llm_needed, ollama_url, ollama_model, verbose)
+            for idx, (cat, sub) in llm_results.items():
+                built_rows[idx]["Category"] = cat
+                built_rows[idx]["Sub Category"] = sub
+
+        for row in built_rows:
+            writer.writerow(row)
+
     finally:
         if should_close:
             f.close()
 
-    return len(transactions)
+    return len(built_rows)
 
 
 def main():
@@ -676,8 +582,23 @@ def main():
     parser.add_argument("--account", default="", help='Source account name (e.g. "招商银行储蓄卡")')
     parser.add_argument("--account2", default="", help="Transfer destination account name")
     parser.add_argument("--timezone", default="+08:00", help="Timezone offset (default: +08:00)")
+    parser.add_argument("--rules", default="",
+                        help="Path to category rules CSV (default: categories.csv next to this script)")
+    parser.add_argument("--categorize", action="store_true",
+                        help="Use local Ollama LLM to categorize unmatched transactions")
+    parser.add_argument("--ollama-url", default="http://localhost:11434",
+                        help="Ollama base URL (default: http://localhost:11434)")
+    parser.add_argument("--ollama-model", default="qwen2.5:32b",
+                        help="Ollama model name (default: qwen2.5:32b)")
     parser.add_argument("-v", "--verbose", action="store_true", help="Print per-page progress")
     args = parser.parse_args()
+
+    rules_path = args.rules or os.path.join(os.path.dirname(os.path.abspath(__file__)), "categories.csv")
+    if not os.path.exists(rules_path):
+        print(f"ERROR: rules file not found: {rules_path}", file=sys.stderr)
+        sys.exit(1)
+    global INCOME_RULES, EXPENSE_RULES, TRANSFER_RULES
+    INCOME_RULES, EXPENSE_RULES, TRANSFER_RULES = load_rules(rules_path)
 
     transactions = extract_transactions(args.input_pdf, verbose=args.verbose)
 
@@ -685,7 +606,16 @@ def main():
         print("ERROR: No transactions extracted. Check that the PDF is a CMB statement.", file=sys.stderr)
         sys.exit(1)
 
-    count = write_csv(transactions, args.output_csv, args.timezone, args.account, args.account2)
+    count = write_csv(
+        transactions, args.output_csv,
+        timezone=args.timezone,
+        account=args.account,
+        account2=args.account2,
+        use_llm=args.categorize,
+        ollama_url=args.ollama_url,
+        ollama_model=args.ollama_model,
+        verbose=args.verbose,
+    )
     print(f"Done: {count} transactions written to {args.output_csv}", file=sys.stderr)
 
 
