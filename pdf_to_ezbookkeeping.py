@@ -11,7 +11,7 @@ Options:
     --timezone OFFSET     Timezone string (default: "+08:00")
     --categorize          Use local Ollama LLM to categorize unmatched transactions
     --ollama-url URL      Ollama base URL (default: http://localhost:11434)
-    --ollama-model MODEL  Ollama model name (default: qwen2.5:32b)
+    --ollama-model MODEL  Ollama model name (default: qwen2.5:14b)
     -v, --verbose         Print per-page progress to stderr
 """
 
@@ -596,8 +596,8 @@ def main():
                         help="Use local Ollama LLM to categorize unmatched transactions")
     parser.add_argument("--ollama-url", default="http://localhost:11434",
                         help="Ollama base URL (default: http://localhost:11434)")
-    parser.add_argument("--ollama-model", default="qwen2.5:32b",
-                        help="Ollama model name (default: qwen2.5:32b)")
+    parser.add_argument("--ollama-model", default="qwen2.5:14b",
+                        help="Ollama model name (default: qwen2.5:14b)")
     parser.add_argument("-v", "--verbose", action="store_true", help="Print per-page progress")
     args = parser.parse_args()
 

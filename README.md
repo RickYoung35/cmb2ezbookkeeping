@@ -26,7 +26,7 @@ python3 pdf_to_ezbookkeeping.py <input.pdf> <output.csv> [options]
 | `--account2 NAME` | *(blank)* | Fallback destination account name for Transfer rows that have no counter-party info |
 | `--categorize` | off | Use local Ollama LLM to categorize transactions not matched by built-in rules |
 | `--ollama-url URL` | `http://localhost:11434` | Ollama API base URL |
-| `--ollama-model MODEL` | `qwen2.5:32b` | Ollama model to use |
+| `--ollama-model MODEL` | `qwen2.5:14b` | Ollama model to use |
 | `--timezone OFFSET` | `+08:00` | Timezone string written to every row |
 | `-v`, `--verbose` | off | Print per-page progress to stderr |
 
@@ -37,7 +37,7 @@ The tool has ~300 built-in keyword rules covering most known merchants. For the 
 ```bash
 # 1. Install and start Ollama, then pull a model
 brew install ollama
-ollama pull qwen2.5:32b   # ~20 GB, recommended for Chinese text
+ollama pull qwen2.5:14b   # ~9 GB, fits in 16 GB VRAM
 
 # 2. Run with LLM fallback
 python3 pdf_to_ezbookkeeping.py statement.pdf out.csv \
